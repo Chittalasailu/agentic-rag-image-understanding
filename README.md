@@ -11,7 +11,11 @@
 ![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 
+[Source Code](https://github.com/Chittalasailu/agentic-rag-image-understanding) · [API Docs (local)](http://localhost:8000/docs) · [Setup](#installation-and-setup) · [Architecture](#system-architecture)
+
 </div>
+
+> **Deployment status:** no hosted deployment (Vercel, Render or otherwise) is configured in this repository or has been verified, so there is no live demo link. Run it locally using the [setup instructions](#installation-and-setup). The frontend (Next.js, port 3000) and backend (FastAPI, port 8000) are separate processes. A `GOOGLE_API_KEY` (Gemini) and `GROQ_API_KEY` are required; `TAVILY_API_KEY` is needed for web search.
 
 ---
 
@@ -89,79 +93,78 @@ This project combines two answering paths behind one web UI:
 
 ## System Architecture
 
-The diagram reflects the actual call graph in [`backend/api.py`](backend/api.py) and [`backend/graph/graph.py`](backend/graph/graph.py). The text and image paths are **separate**: `/chat` runs the LangGraph workflow, `/chat/image` calls the vision model directly.
+The diagrams below reflect the call graph in [`backend/api.py`](backend/api.py) and [`backend/graph/graph.py`](backend/graph/graph.py). The text and image paths are **separate**: `/chat` runs the LangGraph workflow, while `/chat/image` calls the vision model directly.
+
+### Component overview
+
+```mermaid
+flowchart LR
+    UI["Next.js frontend<br/>chat, uploads,<br/>evaluation, observability"]
+
+    subgraph API["FastAPI backend"]
+        UP["POST /upload"]
+        CH["POST /chat<br/>POST /chat/approval"]
+        IM["POST /chat/image"]
+        ST["GET /evaluation<br/>GET /observability"]
+    end
+
+    ING["Ingestion<br/>validate, load, chunk, embed"]
+    WF["LangGraph workflow<br/>see query workflow below"]
+    DB[("ChromaDB")]
+    EMB["Gemini embeddings"]
+    LLM["Groq LLM"]
+    WEB["Tavily web search"]
+    VIS["Gemini vision model"]
+    LOG[("JSONL logs<br/>observability and evaluation")]
+
+    UI --> UP
+    UI --> CH
+    UI --> IM
+    UI --> ST
+
+    UP --> ING
+    ING --> DB
+    ING -.-> EMB
+
+    CH --> WF
+    WF <--> DB
+    WF --> LLM
+    WF --> WEB
+
+    IM --> VIS
+    IM -. "only if the question asks for related images" .-> WEB
+
+    CH --> LOG
+    IM --> LOG
+    ST --> LOG
+```
+
+### Query workflow for `POST /chat` (LangGraph)
 
 ```mermaid
 flowchart TB
-    subgraph UI["Next.js frontend"]
-        U1["Chat input"]
-        U2["Document upload"]
-        U3["Image upload"]
-        U4["Evaluation and observability pages"]
-    end
-
-    subgraph API["FastAPI backend: backend/api.py"]
-        A1["POST /upload"]
-        A2["POST /chat"]
-        A3["POST /chat/approval"]
-        A4["POST /chat/image"]
-        A5["GET /evaluation, GET /observability"]
-    end
-
-    subgraph IDX["Indexing time"]
-        V["Upload validation: extension, size, signature"]
-        L["Loaders: PyPDF, Docx2txt, TextLoader"]
-        S["RecursiveCharacterTextSplitter"]
-        E["Gemini embeddings"]
-        C[("ChromaDB: persistent")]
-    end
-
-    subgraph AG["Query time: LangGraph workflow"]
-        SEC["security_check: prompt guard"]
-        RC["retrieve_router_context: top-4 chunks"]
-        RT{"Router LLM: vectorstore or websearch"}
-        RET["retrieve"]
-        GR["grade_documents: LLM relevance per chunk"]
-        HITL["web_search_approval: interrupt"]
-        WS["websearch: Tavily"]
-        GEN["generate: Groq LLM"]
-        EV["evaluate_generation: hallucination grader then answer grader"]
-        OUT["output_security: redaction and length cap"]
-        BR["build_response: answer and sources"]
-    end
-
-    subgraph IMG["Image path: no graph"]
-        AN["analyze_image: Gemini vision, text extraction"]
-        QA["answer_image_question: Gemini vision with the image"]
-        RI["search_related_images: Tavily, only if asked"]
-    end
-
-    OBS[("observability_history.jsonl and evaluation_history.jsonl")]
-
-    U2 --> A1 --> V --> L --> S --> E --> C
-    U1 --> A2 --> SEC
-    SEC -- blocked --> BR
-    SEC -- allowed --> RC --> RT
-    C -.-> RC
-    RT -- vectorstore --> RET --> GR
-    C -.-> RET
-    RT -- websearch --> HITL
-    GR -- no relevant chunks --> HITL
-    GR -- relevant --> GEN
-    HITL -- approved --> WS --> GEN
+    Q(["Question"]) --> SEC["security_check<br/>prompt guard"]
+    SEC -- blocked --> BR["build_response"]
+    SEC -- allowed --> RC["retrieve_router_context<br/>top 4 chunks"]
+    RC --> RT{"Router LLM"}
+    RT -- vectorstore --> RET["retrieve<br/>reuses router chunks"]
+    RT -- websearch --> HITL{"web_search_approval<br/>human interrupt"}
+    RET --> GR["grade_documents<br/>LLM relevance per chunk"]
+    GR -- "at least one relevant" --> GEN["generate<br/>Groq LLM"]
+    GR -- "none relevant" --> HITL
+    HITL -- approved --> WS["websearch<br/>Tavily, up to 3 results"]
     HITL -- rejected --> BR
-    GEN --> EV
-    EV -- pass --> OUT
-    EV -- fail and retries left --> GEN
-    EV -- fail and retries exhausted --> OUT
+    WS --> GEN
+    GEN --> EV{"evaluate_generation<br/>grounded, then answers question?"}
+    EV -- "pass" --> OUT["output_security<br/>redaction, length cap"]
+    EV -- "fail, retries left" --> INC["increment_retry"]
+    INC --> GEN
+    EV -- "fail, retries exhausted" --> OUT
     OUT --> BR
-    U3 --> A4 --> AN --> QA
-    QA -.-> RI
-    A3 -. resumes paused graph .-> HITL
-    A2 --> OBS
-    A4 --> OBS
-    U4 --> A5 --> OBS
+    BR --> R(["Response and sources"])
 ```
+
+`POST /chat/approval` resumes a paused run with `Command(resume=approved)`. The maximum number of generation retries is 2; after that the best available answer is returned, flagged by `grounded` and `answers_question`.
 
 ### Components
 
@@ -568,7 +571,7 @@ docker compose up -d
 
 Frontend: http://localhost:3000 · Backend: http://localhost:8000/docs. Use `docker compose logs -f` to follow logs and `docker compose down` to stop. This setup was not exercised while preparing this README. The `frontend/Dockerfile` has `EXPOSE 10000` while Compose maps port 3000; Next.js standalone defaults to 3000, so the mapping should work, but the `EXPOSE` line is inconsistent.
 
-There is **no cloud deployment, CI/CD pipeline or production hosting** in this repository.
+There is **no cloud deployment, CI/CD pipeline or production hosting** in this repository: no `vercel.json`, `render.yaml` or similar configuration exists, and no hosted deployment of this project was found when the Vercel and GitHub deployment pages were checked. If you host it, deploy the frontend and backend separately and set `NEXT_PUBLIC_API_URL` (frontend build) and `FRONTEND_URL` (backend CORS) to match.
 
 ### Scalability considerations (current design)
 
