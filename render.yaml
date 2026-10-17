@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: agentic-rag-backend
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn backend.api:api --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # Secrets: set these in the Render dashboard, never in this file.
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      # Set to the deployed frontend URL (for CORS), e.g. https://<your-app>.vercel.app
+      - key: FRONTEND_URL
+        sync: false
+      - key: MAX_UPLOAD_SIZE_MB
+        value: "10"
+      - key: LANGSMITH_TRACING
+        value: "false"
