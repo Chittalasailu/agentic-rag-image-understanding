@@ -1,6 +1,6 @@
 <div align="center">
 
-# Agentic RAG for Image Understanding
+# Agentic RAG for Image Understanding   
 
 **A LangGraph-based adaptive RAG system with a security layer, human-in-the-loop web search, evaluation tracking, and direct multimodal question answering over uploaded images.**
 
